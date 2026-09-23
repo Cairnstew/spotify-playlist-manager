@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+
+# Environment / secrets
+.env
+.spotify-cache
+
+# Logs
+*.log
+
+# Test / tooling
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Nix
+result
+result-*
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

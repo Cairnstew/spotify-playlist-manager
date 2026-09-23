@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spotify-playlist-manager"
+version = "0.1.0"
+description = "A thin, friendly wrapper around the Spotify Web API for playlist manipulation."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "spotipy>=2.24",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+spotify-playlist-manager = "spotify_playlist_manager.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[tool.setuptools.packages.find]
+include = ["spotify_playlist_manager*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: hits the live Spotify Web API (requires credentials + RUN_LIVE=1)",
+]
