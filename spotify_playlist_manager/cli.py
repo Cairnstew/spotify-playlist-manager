@@ -133,6 +133,36 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--volume", type=int, default=None, help="volume 0-100 for volume action")
     p.set_defaults(func=cmd_stream)
 
+    # -- waybar ----------------------------------------------------------
+    p = sub.add_parser("waybar", help="waybar custom-module helpers (now playing / upvote button)")
+    waybar_sub = p.add_subparsers(dest="waybar_action", required=True)
+
+    w = waybar_sub.add_parser("now", help="emit now-playing waybar JSON (exec mode)")
+    w.add_argument("--json", action="store_true", help="print waybar-compatible JSON; otherwise a human-readable line")
+    w.set_defaults(func=cmd_waybar_now)
+
+    w = waybar_sub.add_parser("upvote", help="waybar upvote button helper")
+    w.add_argument("--json", action="store_true", help="emit waybar JSON (exec mode); without it, upvote and print the result (on-click mode)")
+    w.add_argument("--playlist", default="", help="playlist id/URI/URL to vote in (default: auto-detect from now playing)")
+    w.set_defaults(func=cmd_waybar_upvote)
+
+    # -- votes -----------------------------------------------------------
+    p = sub.add_parser("votes", help="vote-based playlist ordering")
+    votes_sub = p.add_subparsers(dest="votes_action", required=True)
+
+    v = votes_sub.add_parser("up", help="upvote the currently playing song")
+    v.set_defaults(func=cmd_votes_up)
+
+    v = votes_sub.add_parser("list", help="show top-voted songs")
+    v.add_argument("--playlist", default="", help="filter by playlist ID")
+    v.add_argument("--limit", type=int, default=20, help="max entries to show")
+    v.set_defaults(func=cmd_votes_list)
+
+    v = votes_sub.add_parser("apply", help="reorder a playlist by votes (most voted first)")
+    v.add_argument("playlist", help="playlist URL, URI, or id")
+    v.add_argument("--dry-run", action="store_true", help="show what would change without modifying Spotify")
+    v.set_defaults(func=cmd_votes_apply)
+
     return parser
 
 
@@ -297,6 +327,123 @@ def cmd_stream(mgr: PlaylistManager, args: argparse.Namespace) -> None:
     elif args.action == "transfer":
         mgr.transfer(dev_id)
         print(f"transferred playback to {args.name!r}.")
+
+
+# ── votes ────────────────────────────────────────────────────────────────
+
+
+def _find_playlist_for_track(mgr: PlaylistManager, track_id: str) -> str:
+    """Find the first playlist containing *track_id*. Returns empty string if not found."""
+    for pl in mgr.playlists():
+        try:
+            tracks = mgr.tracks(pl.id)
+            if any(t.id == track_id for t in tracks):
+                return pl.id
+        except Exception:
+            continue
+    return ""
+
+
+def cmd_votes_up(mgr: PlaylistManager, args: argparse.Namespace) -> None:
+    from spotify_playlist_manager.votes import VoteStore
+
+    np = mgr.now_playing()
+    if np is None:
+        print("nothing playing.", file=sys.stderr)
+        return
+
+    store = VoteStore()
+
+    # Try to find which playlist this track belongs to
+    playlist_id = _find_playlist_for_track(mgr, np.track.id)
+
+    new_count = store.upvote(playlist_id, np.track.id, np.track)
+    print(f"♥ {np.track}  ({new_count} vote{'s' if new_count != 1 else ''})")
+    if playlist_id:
+        print(f"  playlist: {playlist_id}")
+
+
+def cmd_votes_list(mgr: PlaylistManager, args: argparse.Namespace) -> None:
+    from spotify_playlist_manager.votes import VoteStore
+
+    store = VoteStore()
+    entries = store.top_tracks(args.playlist, limit=args.limit)
+
+    if not entries:
+        print("no votes yet.")
+        return
+
+    for i, entry in enumerate(entries, 1):
+        label = f"{entry.artist} — {entry.track_name}" if entry.artist else entry.track_id
+        print(f"  {i:2}. {entry.votes:>3}  {label}")
+
+
+def cmd_votes_apply(mgr: PlaylistManager, args: argparse.Namespace) -> None:
+    from spotify_playlist_manager.votes import VoteStore, apply_votes
+
+    store = VoteStore()
+    results = apply_votes(mgr, store, args.playlist, dry_run=args.dry_run)
+
+    if not results:
+        print("no votes to apply.")
+        return
+
+    prefix = "[dry-run] " if args.dry_run else ""
+    for i, (name, artist, votes) in enumerate(results, 1):
+        label = f"{artist} — {name}" if artist else name
+        print(f"  {prefix}{i:2}. {votes:>3}  {label}")
+
+    if not args.dry_run:
+        print(f"\nreordered {len(results)} track(s).")
+
+
+# ── waybar ───────────────────────────────────────────────────────────────
+
+
+def cmd_waybar_now(mgr: PlaylistManager, args: argparse.Namespace) -> None:
+    """One now-playing snapshot for a waybar custom module.
+
+    ``--json`` prints only the waybar JSON on stdout (nothing else), as an
+    ``exec`` module expects; waybar's ``interval`` re-runs this to poll.
+    """
+    import json as _json
+
+    from spotify_playlist_manager.waybar import now_playing_output
+
+    now = mgr.now_playing()
+    if args.json:
+        print(_json.dumps(now_playing_output(now)))
+    else:
+        print(str(now) if now else "nothing playing")
+
+
+def cmd_waybar_upvote(mgr: PlaylistManager, args: argparse.Namespace) -> None:
+    """Upvote button helper.
+
+    ``--json`` is the ``exec`` mode: emit the vote-count waybar JSON only.
+    Without it (waybar's ``on-click`` mode) the current track is upvoted and
+    a human-readable result is printed.
+    """
+    import json as _json
+
+    from spotify_playlist_manager.votes import VoteStore
+    from spotify_playlist_manager.waybar import upvote_current_track, upvote_output
+
+    result = upvote_current_track(mgr, VoteStore(), playlist=args.playlist)
+
+    if result is None:
+        if args.json:
+            print(_json.dumps(upvote_output(0)))
+        else:
+            print("nothing playing.", file=sys.stderr)
+        return
+
+    if args.json:
+        print(_json.dumps(upvote_output(result.votes, track=result.track, playlist=result.playlist)))
+    else:
+        print(f"♥ {result.track}  ({result.votes} vote{'s' if result.votes != 1 else ''})")
+        if result.playlist:
+            print(f"  playlist: {result.playlist}")
 
 
 def main(argv: list[str] | None = None) -> int:

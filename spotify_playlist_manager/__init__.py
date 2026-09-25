@@ -26,6 +26,13 @@ from .models import NowPlaying, Playlist, Track
 from .player import blocks_until_change, watch_now_playing
 from .rate_limit import RateLimitGuard, retry_after_seconds
 from .stream import ConnectDevice, find_librespot
+from .waybar import (
+    UpvoteResult,
+    find_playlist_for_track,
+    now_playing_output,
+    upvote_current_track,
+    upvote_output,
+)
 
 __version__ = "0.1.0"
 
@@ -43,6 +50,11 @@ __all__ = [
     "blocks_until_change",
     "ConnectDevice",
     "find_librespot",
+    "now_playing_output",
+    "upvote_output",
+    "upvote_current_track",
+    "UpvoteResult",
+    "find_playlist_for_track",
     "client_from_env",
     "client_from_credentials",
     "RateLimitGuard",
