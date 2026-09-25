@@ -134,6 +134,29 @@ class UpvoteResult:
     votes: int
 
 
+def current_vote_output(
+    mgr: PlaylistManager,
+    store: VoteStore,
+    playlist: str = "",
+) -> dict | None:
+    """**Read-only** waybar JSON for the vote button.
+
+    This is the ``exec``/poll path: it displays the current vote count
+    without incrementing it. When *playlist* is empty the containing
+    playlist is auto-detected from the now-playing snapshot (see
+    :func:`find_playlist_for_track`). Returns ``None`` when nothing is
+    playing — the CLI turns that into a zero-count button.
+    """
+    now = mgr.now_playing()
+    if now is None:
+        return None
+    track = now.track
+    if not playlist:
+        playlist = find_playlist_for_track(mgr, track.id)
+    votes = store.get_votes(playlist, track.id)
+    return upvote_output(votes, track=track, playlist=playlist)
+
+
 def upvote_current_track(
     mgr: PlaylistManager,
     store: VoteStore,
@@ -141,9 +164,11 @@ def upvote_current_track(
 ) -> UpvoteResult | None:
     """Upvote the currently playing track.
 
-    When *playlist* is empty the containing playlist is auto-detected from
-    the now-playing snapshot (see :func:`find_playlist_for_track`). Returns
-    ``None`` when nothing is playing, otherwise an :class:`UpvoteResult`.
+    This is the ``on-click`` path: it increments the vote count via
+    :meth:`VoteStore.upvote`. When *playlist* is empty the containing
+    playlist is auto-detected from the now-playing snapshot (see
+    :func:`find_playlist_for_track`). Returns ``None`` when nothing is
+    playing, otherwise an :class:`UpvoteResult`.
     """
     now = mgr.now_playing()
     if now is None:

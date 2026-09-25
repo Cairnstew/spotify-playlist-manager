@@ -16,6 +16,7 @@ import pytest
 from spotify_playlist_manager.models import NowPlaying, Track
 from spotify_playlist_manager.waybar import (
     UpvoteResult,
+    current_vote_output,
     find_playlist_for_track,
     now_playing_output,
     upvote_current_track,
@@ -169,6 +170,71 @@ class TestUpvoteCurrentTrack:
         mgr.playlists.assert_not_called()
 
 
+class TestCurrentVoteOutput:
+    """``current_vote_output`` is the read-only exec/poll path: it must
+    display the existing count without ever calling ``store.upvote``."""
+
+    def _mgr_playing(self, track: Track) -> MagicMock:
+        mgr = MagicMock()
+        mgr.now_playing.return_value = _make_now(track)
+        return mgr
+
+    def test_reads_existing_count_without_upvoting(self) -> None:
+        track = _make_track("abc", "Some Song")
+        mgr = self._mgr_playing(track)
+        mgr.playlists.return_value = [MagicMock(id="pl1")]
+        mgr.tracks.return_value = [track]
+
+        store = MagicMock()
+        store.get_votes.return_value = 5  # the track was already upvoted
+
+        out = current_vote_output(mgr, store)
+
+        assert out["text"] == "♥ 5"
+        assert out["class"] == "upvoted"
+        assert "Some Song" in out["tooltip"]
+        assert "pl1" in out["tooltip"]
+        store.get_votes.assert_called_once_with("pl1", "abc")
+        store.upvote.assert_not_called()  # read-only: no increment
+
+    def test_zero_votes_when_not_previously_voted(self) -> None:
+        track = _make_track("abc", "Some Song")
+        mgr = self._mgr_playing(track)
+        mgr.playlists.return_value = [MagicMock(id="pl1")]
+        mgr.tracks.return_value = [track]
+
+        store = MagicMock()
+        store.get_votes.return_value = 0
+
+        out = current_vote_output(mgr, store)
+
+        assert out["text"] == "♡"
+        assert out["class"] == "not-upvoted"
+        store.get_votes.assert_called_once_with("pl1", "abc")
+        store.upvote.assert_not_called()
+
+    def test_explicit_playlist_does_not_scan(self) -> None:
+        track = _make_track("abc", "Some Song")
+        mgr = self._mgr_playing(track)
+
+        store = MagicMock()
+        store.get_votes.return_value = 3
+        out = current_vote_output(mgr, store, playlist="pl_explicit")
+
+        assert out["text"] == "♥ 3"
+        store.get_votes.assert_called_once_with("pl_explicit", "abc")
+        mgr.playlists.assert_not_called()
+
+    def test_nothing_playing_returns_none(self) -> None:
+        mgr = MagicMock()
+        mgr.now_playing.return_value = None
+        store = MagicMock()
+
+        assert current_vote_output(mgr, store) is None
+        store.get_votes.assert_not_called()
+        store.upvote.assert_not_called()
+
+
 class TestWaybarCli:
     """The CLI wrappers emit exactly the right stdout and drive the mocks."""
 
@@ -204,7 +270,7 @@ class TestWaybarCli:
         assert "Some Song" in captured.out.strip()
         assert len(captured.out.strip().splitlines()) == 1
 
-    def test_upvote_json_mode(self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_upvote_json_mode_calls_no_increment(self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
         from spotify_playlist_manager import cli as cli_mod
 
         track = _make_track("abc", "Some Song", "Some Artist")
@@ -213,7 +279,7 @@ class TestWaybarCli:
         mgr.tracks.return_value = [track]
 
         store = MagicMock()
-        store.upvote.return_value = 2
+        store.get_votes.return_value = 2
         monkeypatch.setattr("spotify_playlist_manager.votes.VoteStore", lambda *a, **k: store)
 
         cli_mod.cmd_waybar_upvote(mgr, self._args(json=True))
@@ -221,8 +287,9 @@ class TestWaybarCli:
         data = json.loads(captured.out.strip())
         assert data["text"] == "♥ 2"
         assert data["class"] == "upvoted"
-        # exec mode performed the upvote against the auto-detected playlist
-        store.upvote.assert_called_once_with("pl1", "abc", track)
+        # exec mode is READ-ONLY: it displays the existing count, never upvotes
+        store.get_votes.assert_called_once_with("pl1", "abc")
+        store.upvote.assert_not_called()
 
     def test_upvote_on_click_mode(self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
         from spotify_playlist_manager import cli as cli_mod
@@ -252,4 +319,5 @@ class TestWaybarCli:
         data = json.loads(capsys.readouterr().out.strip())
         assert data["text"] == "♡"
         assert data["class"] == "not-upvoted"
+        store.get_votes.assert_not_called()
         store.upvote.assert_not_called()

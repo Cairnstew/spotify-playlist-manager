@@ -421,29 +421,36 @@ def cmd_waybar_upvote(mgr: PlaylistManager, args: argparse.Namespace) -> None:
     """Upvote button helper.
 
     ``--json`` is the ``exec`` mode: emit the vote-count waybar JSON only.
-    Without it (waybar's ``on-click`` mode) the current track is upvoted and
-    a human-readable result is printed.
+    It is **read-only** — it shows the current count without incrementing,
+    so waybar's ``interval`` polling cannot inflate the count. Without it
+    (waybar's ``on-click`` mode) the current track is upvoted and a
+    human-readable result is printed.
     """
     import json as _json
 
     from spotify_playlist_manager.votes import VoteStore
-    from spotify_playlist_manager.waybar import upvote_current_track, upvote_output
+    from spotify_playlist_manager.waybar import (
+        current_vote_output,
+        upvote_current_track,
+        upvote_output,
+    )
 
-    result = upvote_current_track(mgr, VoteStore(), playlist=args.playlist)
-
-    if result is None:
-        if args.json:
-            print(_json.dumps(upvote_output(0)))
-        else:
-            print("nothing playing.", file=sys.stderr)
-        return
+    store = VoteStore()
 
     if args.json:
-        print(_json.dumps(upvote_output(result.votes, track=result.track, playlist=result.playlist)))
-    else:
-        print(f"♥ {result.track}  ({result.votes} vote{'s' if result.votes != 1 else ''})")
-        if result.playlist:
-            print(f"  playlist: {result.playlist}")
+        # exec/poll mode: display only, never increment.
+        out = current_vote_output(mgr, store, playlist=args.playlist)
+        print(_json.dumps(out if out is not None else upvote_output(0)))
+        return
+
+    # on-click mode: actually upvote (increments the counter).
+    result = upvote_current_track(mgr, store, playlist=args.playlist)
+    if result is None:
+        print("nothing playing.", file=sys.stderr)
+        return
+    print(f"♥ {result.track}  ({result.votes} vote{'s' if result.votes != 1 else ''})")
+    if result.playlist:
+        print(f"  playlist: {result.playlist}")
 
 
 def main(argv: list[str] | None = None) -> int:
