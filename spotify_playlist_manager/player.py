@@ -21,11 +21,38 @@ import logging
 import time
 from typing import Iterator
 
+import spotipy
+
 from .client import PlaylistManager
 from .logging_config import log_event
 from .models import NowPlaying
+from .rate_limit import retry_after_seconds
 
 _PLAYBACK_LOG = logging.getLogger("spotify_playlist_manager.playback")
+
+
+def _poll_now_playing(manager: PlaylistManager) -> tuple[NowPlaying | None, bool]:
+    """Poll current playback, distinguishing a 429 from "nothing playing".
+
+    Returns ``(snapshot, rate_limited)``.  When the API answers 429 (rate
+    limit — spotipy retries internally first, then raises
+    ``SpotifyException`` with ``http_status == 429``), ``rate_limited`` is
+    True and ``snapshot`` is None; the caller should retry next interval
+    rather than treat it as "playback stopped".
+    """
+    try:
+        return manager.now_playing(), False
+    except spotipy.SpotifyException as exc:
+        if exc.http_status != 429:
+            raise
+        retry_after = retry_after_seconds(getattr(exc, "headers", None))
+        log_event(
+            _PLAYBACK_LOG,
+            "playback.rate_limited",
+            http_status=429,
+            retry_after=retry_after,
+        )
+        return None, True
 
 
 def _playback_key(now: NowPlaying | None) -> dict:
@@ -116,6 +143,11 @@ def watch_now_playing(
 
     ``None`` is yielded when playback stops (nothing playing on any device).
 
+    A ``429 Too Many Requests`` response is *not* treated as "nothing
+    playing": it is logged, the loop sleeps one ``interval``, and polling
+    resumes — the last known state is kept and no snapshot is yielded, so a
+    waybar-style consumer keeps its current output instead of clearing it.
+
     Parameters
     ----------
     interval:
@@ -127,7 +159,12 @@ def watch_now_playing(
     """
     last_key: dict | None = None
     while True:
-        now = manager.now_playing()
+        now, rate_limited = _poll_now_playing(manager)
+        if rate_limited:
+            # A 429 is not "nothing playing": keep the last known state and
+            # retry next interval instead of clearing the widget.
+            time.sleep(interval)
+            continue
         key = _playback_key(now)
 
         if last_key is not None:
@@ -150,14 +187,21 @@ def blocks_until_change(
     for scripted tools that want to act on the *next* track.
     """
     start = time.monotonic()
-    first = manager.now_playing()
+    first, rate_limited = _poll_now_playing(manager)
+    if rate_limited:
+        # No usable first snapshot; fall through to the loop below so the
+        # next successful poll becomes the baseline.
+        first = None
     prev_key = _playback_key(first)
 
     while True:
         if timeout is not None and time.monotonic() - start >= timeout:
             return first
         time.sleep(interval)
-        now = manager.now_playing()
+        now, rate_limited = _poll_now_playing(manager)
+        if rate_limited:
+            # Keep waiting through the rate limit; do not report "stopped".
+            continue
         curr_key = _playback_key(now)
         if curr_key != prev_key:
             _log_playback_change(prev_key, curr_key)
