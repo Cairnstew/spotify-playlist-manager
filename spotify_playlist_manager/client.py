@@ -31,6 +31,7 @@ import spotipy
 from .errors import PlaylistNotFoundError
 from .logging_config import log_event
 from .models import NowPlaying, Playlist, Track
+from .rate_limit import RateLimitGuard, retry_after_seconds
 from .utils import chunk, playlist_id_from_ref, track_uri_from_ref
 
 _API_LOG = logging.getLogger("spotify_playlist_manager.api")
@@ -67,12 +68,22 @@ class _ApiProxy:
 
     Intercepts ``_internal_call`` — the single dispatch point for all
     spotipy API methods — to record method, endpoint, response status,
-    latency, and errors.  All other attribute access is forwarded to the
-    underlying ``Spotify`` instance.
+    latency, and errors, and to apply the :class:`RateLimitGuard` (pacing
+    before each call, backoff after a 429).  All other attribute access is
+    forwarded to the underlying ``Spotify`` instance.
     """
 
-    def __init__(self, client: spotipy.Spotify) -> None:
+    def __init__(
+        self,
+        client: spotipy.Spotify,
+        rate_limit: RateLimitGuard | None = None,
+    ) -> None:
         object.__setattr__(self, "_client", client)
+        object.__setattr__(
+            self,
+            "_guard",
+            rate_limit if rate_limit is not None else RateLimitGuard(),
+        )
 
     # -- Proxy magic methods ------------------------------------------------
 
@@ -89,11 +100,17 @@ class _ApiProxy:
 
     def _internal_call(self, method: str, url: str, payload: Any, params: Any) -> Any:
         client = object.__getattribute__(self, "_client")
+        guard = object.__getattribute__(self, "_guard")
         endpoint = _endpoint_from_url(url)
+
+        # Pace before the request so we stay inside Spotify's documented
+        # window instead of relying on hitting 429s.
+        guard.acquire()
         start = time.monotonic()
 
         try:
             result = client._internal_call(method, url, payload, params)
+            guard.record_success()
             elapsed_ms = round((time.monotonic() - start) * 1000)
             log_event(
                 _API_LOG,
@@ -106,16 +123,30 @@ class _ApiProxy:
             return result
         except spotipy.SpotifyException as exc:
             elapsed_ms = round((time.monotonic() - start) * 1000)
-            log_event(
-                _API_LOG,
-                f"{method} {endpoint}",
-                http_method=method,
-                endpoint=endpoint,
-                status="error",
-                latency_ms=elapsed_ms,
-                http_status=exc.http_status,
-                reason=exc.reason,
-            )
+            if exc.http_status == 429:
+                retry_after = retry_after_seconds(getattr(exc, "headers", None))
+                guard.record_429(retry_after)
+                log_event(
+                    _API_LOG,
+                    f"{method} {endpoint}",
+                    http_method=method,
+                    endpoint=endpoint,
+                    status="rate_limited",
+                    latency_ms=elapsed_ms,
+                    http_status=exc.http_status,
+                    retry_after=retry_after,
+                )
+            else:
+                log_event(
+                    _API_LOG,
+                    f"{method} {endpoint}",
+                    http_method=method,
+                    endpoint=endpoint,
+                    status="error",
+                    latency_ms=elapsed_ms,
+                    http_status=exc.http_status,
+                    reason=exc.reason,
+                )
             raise
 
 
@@ -130,10 +161,19 @@ class PlaylistManager:
     client:
         An authenticated ``spotipy.Spotify`` instance — normally produced by
         :func:`~spotify_playlist_manager.auth.client_from_env`.
+    rate_limit:
+        Optional :class:`~spotify_playlist_manager.rate_limit.RateLimitGuard`
+        to control API pacing.  When None (default), a guard with Spotify's
+        documented limits (180 requests / 30 s) is created automatically.
+        Pass a guard constructed with ``enabled=False`` to disable pacing.
     """
 
-    def __init__(self, client: spotipy.Spotify) -> None:
-        self.client = _ApiProxy(client)
+    def __init__(
+        self,
+        client: spotipy.Spotify,
+        rate_limit: RateLimitGuard | None = None,
+    ) -> None:
+        self.client = _ApiProxy(client, rate_limit=rate_limit)
 
     # ------------------------------------------------------------------ #
     # Construction helpers
